@@ -1,27 +1,244 @@
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 from database import conectar_bd
-import json
+from dotenv import load_dotenv
+import os
+from functools import wraps
 
+load_dotenv()
+
+from flask_jwt_extended import (
+    JWTManager,
+    create_access_token,
+    jwt_required,
+    get_jwt_identity,
+    get_jwt
+)
+from werkzeug.security import (
+    generate_password_hash,
+    check_password_hash
+)
+
+# Inicialización de la app
 app = Flask(__name__)
-CORS(app)  # Permite peticiones desde React (Vite en puerto 5173)
+# Es buena práctica tener un valor por defecto para evitar que la app se caiga en desarrollo si falta el .env
+app.config["JWT_SECRET_KEY"] = os.getenv("JWT_SECRET_KEY", "super-secreta-2026") 
+jwt = JWTManager(app)
+CORS(app)
 
-@app.route("/")
-def inicio():
-    return jsonify({"mensaje": "API hoja de vida funcionando"})
+# Decorador corregido para validar roles
+def rol_requerido(rol):
+    def decorador(funcion):
+        @wraps(funcion)
+        @jwt_required()
+        def wrapper(*args, **kwargs):
+            claims = get_jwt()
+            if claims.get("rol") != rol:
+                return jsonify({"mensaje": "No tienes permisos para acceder"}), 403
+            return funcion(*args, **kwargs)
+        return wrapper
+    return decorador
+
 
 @app.route("/probar")
 def probar_data():
     conec = conectar_bd()
     if conec.is_connected():
         conec.close()
-    return jsonify({"mensaje": "Conexion ok"})
+    return {"mensaje": "Conexion ok"}
 
 
-# RUTAS DE HOJAS DE VIDA (CRUD Y REGISTRO COMPLETO)
+@app.route("/api/registro-usuario", methods=["POST"])
+def registro_usuario():
+    datos = request.get_json()
+
+    if not datos:
+        return jsonify({"mensaje": "No se recibieron datos"}), 400
+
+    nombre = datos.get("nombre", "").strip()
+    correo = datos.get("correo", "").strip().lower()
+    password = datos.get("password", "")
+
+    if not nombre or not correo or not password:
+        return jsonify({"mensaje": "Todos los campos son obligatorios"}), 400
+
+    if len(password) < 8:
+        return jsonify({"mensaje": "Minimo 8 caracteres"}), 400
+
+    conec = conectar_bd()
+    cursor = conec.cursor()
+
+    cursor.execute("SELECT id FROM usuarios WHERE correo = %s", (correo,))
+    if cursor.fetchone():
+        cursor.close()
+        conec.close()
+        return jsonify({"mensaje": "El correo ya está registrado"}), 400
+
+    password_hash = generate_password_hash(password)
+
+    # El registro público siempre crea un aprendiz
+    sql = """
+        INSERT INTO usuarios (nombre, correo, password, rol)
+        VALUES (%s, %s, %s, 'aprendiz')
+    """
+    cursor.execute(sql, (nombre, correo, password_hash))
+    conec.commit()
+    id_usuario = cursor.lastrowid
+
+    cursor.close()
+    conec.close()
+
+    return jsonify({"mensaje": "Usuario registrado correctamente", "id": id_usuario}), 201
 
 
+@app.route("/api/login", methods=["POST"])
+def login():
+    datos = request.get_json()
+    correo = datos.get("correo", "").strip().lower()
+    password = datos.get("password", "")
+
+    conec = conectar_bd()
+    cursor = conec.cursor(dictionary=True)
+
+    cursor.execute("""
+        SELECT id, nombre, correo, password, rol, estado 
+        FROM usuarios WHERE correo = %s
+    """, (correo,))
+    usuario = cursor.fetchone()
+
+    cursor.close()
+    conec.close()
+
+    # Validar credenciales
+    if not usuario or not check_password_hash(usuario["password"], password):
+        return jsonify({"mensaje": "Correo o contraseña incorrectos"}), 401
+
+    if not usuario["estado"]:
+        return jsonify({"mensaje": "Cuenta desactivada"}), 403
+
+    # Generar el token
+    token = create_access_token(
+        identity=str(usuario["id"]),
+        additional_claims={"rol": usuario["rol"]}
+    )
+
+    return jsonify({
+        "mensaje": "Inicio de sesión exitoso",
+        "token": token,
+        "usuario": {
+            "id": usuario["id"],
+            "nombre": usuario["nombre"],
+            "correo": usuario["correo"],
+            "rol": usuario["rol"]
+        }
+    }), 200
+
+
+@app.route("/api/registrohv", methods=["POST"])
+@jwt_required()
+def registrar_hojavida():
+    # Obtener el id del usuario desde el token
+    usuario_id = int(get_jwt_identity())
+    rol = get_jwt().get("rol")
+
+    if rol != "aprendiz":
+        return jsonify({"mensaje": "Solo los aprendices pueden registrar HV"}), 403
+
+    datos = request.get_json()
+    conec = conectar_bd()
+    cursor = conec.cursor()
+
+    sql = """
+        INSERT INTO hojas_vida
+        (usuario_id, nombre, edad, ciudad, correo, fotografia, programa, ficha, jornada)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+    """
+    valores = (
+        usuario_id, 
+        datos["nombre"], 
+        datos["edad"],
+        datos["ciudad"], 
+        datos["correo"], 
+        datos.get("fotografia"),
+        datos["programa"], 
+        datos["ficha"], 
+        datos["jornada"]
+    )
+
+    cursor.execute(sql, valores)
+    conec.commit()
+    id_regenerado = cursor.lastrowid
+
+    cursor.close()
+    conec.close()
+
+    return jsonify({"mensaje": "Registro de hoja de vida", "id": id_regenerado}), 201
+
+
+@app.route("/api/mi-hoja-vida", methods=["GET"])
+@jwt_required()
+def mi_hoja_vida():
+    usuario_id = int(get_jwt_identity())
+    rol = get_jwt().get("rol")
+
+    if rol != "aprendiz":
+        return jsonify({"mensaje": "Consulta exclusiva para aprendices"}), 403
+
+    conec = conectar_bd()
+    cursor = conec.cursor(dictionary=True)
+
+    # 1. Obtener datos personales
+    cursor.execute("SELECT * FROM hojas_vida WHERE usuario_id=%s", (usuario_id,))
+    hv = cursor.fetchone()
+
+    if not hv:
+        cursor.close()
+        conec.close()
+        return jsonify({"mensaje": "No tienes una hoja de vida registrada"}), 404
+
+    hoja_vida_id = hv["id"]
+
+    # 2. Obtener estudios
+    cursor.execute("SELECT * FROM estudios WHERE hoja_vida_id=%s", (hoja_vida_id,))
+    estudios = cursor.fetchall()
+
+    # 3. Obtener cursos
+    cursor.execute("SELECT * FROM cursos WHERE hoja_vida_id=%s", (hoja_vida_id,))
+    cursos = cursor.fetchall()
+
+    # 4. Obtener experiencias
+    cursor.execute("SELECT * FROM experiencias WHERE hoja_vida_id=%s", (hoja_vida_id,))
+    experiencias = cursor.fetchall()
+
+    # 5. Obtener habilidades vinculadas a las experiencias de esta HV
+    cursor.execute("""
+        SELECT h.id, h.nombre, h.experiencia_id 
+        FROM habilidades h
+        INNER JOIN experiencias e ON h.experiencia_id = e.id
+        WHERE e.hoja_vida_id = %s
+    """, (hoja_vida_id,))
+    habilidades = cursor.fetchall()
+
+    # Asociar habilidades con cada experiencia
+    for experiencia in experiencias:
+        experiencia["habilidades"] = [
+            h for h in habilidades if h["experiencia_id"] == experiencia["id"]
+        ]
+
+    cursor.close()
+    conec.close()
+
+    return jsonify({
+        "datos_personales": hv,
+        "estudios": estudios,
+        "cursos": cursos,
+        "experiencias": experiencias
+    }), 200
+
+
+# LISTAR TODAS LAS HOJAS DE VIDA (Ruta protegida para reclutadores)
 @app.route("/api/hojas-vida", methods=["GET"])
+@rol_requerido("reclutador")
 def obtener_hojasvida():
     conec = conectar_bd()
     cursor = conec.cursor(dictionary=True)
@@ -29,317 +246,88 @@ def obtener_hojasvida():
     hojas_vida = cursor.fetchall()
     cursor.close()
     conec.close()
-    return jsonify(hojas_vida), 200
-
-@app.route("/api/hojas-vida/<int:id>", methods=["GET"])
-def obtener_hojasvidaid(id):
-    conec = conectar_bd()
-    cursor = conec.cursor(dictionary=True)
-    cursor.execute("SELECT * FROM hojas_vida WHERE id = %s", (id,))
-    hoja_vida = cursor.fetchone()
-    cursor.close()
-    conec.close()
-    if hoja_vida:
-        return jsonify(hoja_vida), 200
-    return jsonify({"mensaje": "Hoja de vida no encontrada"}), 404
-
-@app.route("/api/registrohv", methods=["POST"])
-def registrar_hojavida():
-    conec = None
-    cursor = None
-    try:
-        datos = request.get_json() or {}
-        conec = conectar_bd()
-        cursor = conec.cursor()
-
-        # 1. Validar correo duplicado
-        cursor.execute("SELECT id FROM hojas_vida WHERE correo = %s", (datos.get('correo'),))
-        if cursor.fetchone():
-            cursor.close()
-            conec.close()
-            return jsonify({"mensaje": "El correo ya está registrado con otra hoja de vida"}), 400
-
-        # 2. Insertar datos principales en hojas_vida
-        sql_hv = """
-            INSERT INTO hojas_vida (nombre, edad, ciudad, correo, fotografia, programa, ficha, jornada)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
-        """
-        cursor.execute(sql_hv, (
-            datos.get('nombre'),
-            datos.get('edad'),
-            datos.get('ciudad'),
-            datos.get('correo'),
-            datos.get('fotografia', ''),
-            datos.get('programa'),
-            datos.get('ficha'),
-            datos.get('jornada')
-        ))
-        id_hoja_vida = cursor.lastrowid
-
-        # 3. Insertar Formación Académica (tabla estudios)
-        if datos.get('nivel') or datos.get('institucion') or datos.get('titulo'):
-            sql_estudio = """
-                INSERT INTO estudios (hoja_vida_id, nivel, institucion, titulo, anio_graduacion)
-                VALUES (%s, %s, %s, %s, %s)
-            """
-            cursor.execute(sql_estudio, (
-                id_hoja_vida,
-                datos.get('nivel', ''),
-                datos.get('institucion', ''),
-                datos.get('titulo', ''),
-                datos.get('anio', '') or datos.get('anio_graduacion', '')
-            ))
-
-        # 4. Insertar Cursos realizados (tabla cursos)
-        cursos = datos.get('cursos', [])
-        if isinstance(cursos, list):
-            sql_curso = "INSERT INTO cursos (hoja_vida_id, nombre) VALUES (%s, %s)"
-            for curso in cursos:
-                if curso and str(curso).strip():
-                    cursor.execute(sql_curso, (id_hoja_vida, str(curso).strip()))
-
-        # 5. Insertar Experiencias Laborales y sus Habilidades
-        experiencias = datos.get('experiencias', [])
-        if isinstance(experiencias, list):
-            sql_exp = """
-                INSERT INTO experiencias (hoja_vida_id, empresa, cargo, tiempo, funciones)
-                VALUES (%s, %s, %s, %s, %s)
-            """
-            sql_hab = """
-                INSERT INTO habilidades (experiencia_id, nombre)
-                VALUES (%s, %s)
-            """
-
-            for exp in experiencias:
-                # Convertir lista de funciones a string legible si viene como array
-                funciones = exp.get('funciones', '')
-                if isinstance(funciones, list):
-                    funciones_str = ", ".join(funciones)
-                else:
-                    funciones_str = str(funciones)
-
-                cursor.execute(sql_exp, (
-                    id_hoja_vida,
-                    exp.get('empresa', ''),
-                    exp.get('cargo', ''),
-                    exp.get('tiempo', ''),
-                    funciones_str
-                ))
-                id_experiencia = cursor.lastrowid
-
-                # Guardar las habilidades asociadas a esta experiencia
-                habilidades = exp.get('habilidades', [])
-                if isinstance(habilidades, list):
-                    for hab in habilidades:
-                        if hab and str(hab).strip():
-                            cursor.execute(sql_hab, (id_experiencia, str(hab).strip()))
-
-        # Si todo salió bien, confirmamos la transacción
-        conec.commit()
-
-        return jsonify({
-            "mensaje": "Hoja de vida registrada con éxito",
-            "id": id_hoja_vida
-        }), 201
-
-    except Exception as e:
-        if conec:
-            conec.rollback()
-        print("Error en registrohv:", str(e))
-        return jsonify({"mensaje": f"Error al procesar el registro: {str(e)}"}), 500
-
-    finally:
-        if cursor:
-            cursor.close()
-        if conec and conec.is_connected():
-            conec.close()
-
-@app.route("/api/actualizarhv/<int:id>", methods=["PUT"])
-def actualizarhv(id):
-    datos = request.get_json()
-    conec = conectar_bd()
-    cursor = conec.cursor(buffered=True)
-
-    cursor.execute("SELECT id FROM hojas_vida WHERE id=%s", (id,))
-    if cursor.fetchone() is None:
-        cursor.close()
-        conec.close()
-        return jsonify({"Mensaje": "No se encontró la hoja de vida"}), 404
-
-    cursor.execute("SELECT id FROM hojas_vida WHERE correo = %s AND id != %s", (datos["correo"], id))
-    if cursor.fetchone() is not None:
-        cursor.close()
-        conec.close()
-        return jsonify({"Mensaje": "El correo ya está registrado con otra hoja de vida"}), 400
-
-    sql = """
-        UPDATE hojas_vida
-        SET nombre=%s, edad=%s, ciudad=%s, correo=%s,
-            fotografia=%s, programa=%s, ficha=%s, jornada=%s
-        WHERE id=%s
-    """
-    cursor.execute(sql, (
-        datos["nombre"],
-        datos["edad"],
-        datos["ciudad"],
-        datos["correo"],
-        datos.get("fotografia", ""),
-        datos["programa"],
-        datos["ficha"],
-        datos["jornada"],
-        id
-    ))
-    conec.commit()
-    cursor.close()
-    conec.close()
-    return jsonify({"Mensaje": "Hoja de vida actualizada", "id": id}), 200
-
-@app.route("/api/eliminarhv/<int:id>", methods=["DELETE"])
-def eliminar_hv(id):
-    conec = conectar_bd()
-    cursor = conec.cursor()
-    cursor.execute("SELECT id FROM hojas_vida WHERE id=%s", (id,))
-    if cursor.fetchone() is None:
-        cursor.close()
-        conec.close()
-        return jsonify({"mensaje": "No se encontró la hoja de vida"}), 404
-
-    cursor.execute("DELETE FROM hojas_vida WHERE id=%s", (id,))
-    conec.commit()
-    cursor.close()
-    conec.close()
-    return jsonify({"mensaje": "Hoja de vida eliminada"}), 200
+    return jsonify({"mensaje_prueba": "¡Hola Santiago, sí soy yo!"}), 200
 
 
-# RUTAS INDIVIDUALES (Para operaciones atómicas)
-
-
-@app.route("/api/hojas-vida/<int:hoja_vida_id>/estudios", methods=["POST"])
 @app.route("/api/hojasvida/<int:hoja_vida_id>/estudios", methods=["POST"])
 def registrar_estudio(hoja_vida_id):
-    try:
-        datos = request.get_json() or {}
-        conec = conectar_bd()
-        cursor = conec.cursor()
-        sql = """
-            INSERT INTO estudios (hoja_vida_id, nivel, institucion, titulo, anio_graduacion)
-            VALUES (%s, %s, %s, %s, %s)
-        """
-        cursor.execute(sql, (
-            hoja_vida_id,
-            datos.get("nivel", ""),
-            datos.get("institucion", ""),
-            datos.get("titulo", ""),
-            datos.get("anio_graduacion", "") or datos.get("anio", "")
-        ))
-        conec.commit()
-        id_estudio = cursor.lastrowid
-        cursor.close()
-        conec.close()
-        return jsonify({"mensaje": "Estudio registrado", "id": id_estudio, "hoja_vida_id": hoja_vida_id}), 201
-    except Exception as e:
-        return jsonify({"mensaje": str(e)}), 500
-
-@app.route("/api/hojas-vida/<int:hoja_vida_id>/experiencias", methods=["POST"])
-def registrar_experiencia(hoja_vida_id):
-    try:
-        datos = request.get_json() or {}
-        conec = conectar_bd()
-        cursor = conec.cursor()
-        sql = """
-            INSERT INTO experiencias (hoja_vida_id, empresa, cargo, tiempo, funciones)
-            VALUES (%s, %s, %s, %s, %s)
-        """
-        funciones = datos.get("funciones", "")
-        if isinstance(funciones, list):
-            funciones = ", ".join(funciones)
-
-        cursor.execute(sql, (
-            hoja_vida_id,
-            datos.get("empresa", ""),
-            datos.get("cargo", ""),
-            datos.get("tiempo", ""),
-            funciones
-        ))
-        conec.commit()
-        id_exp = cursor.lastrowid
-        cursor.close()
-        conec.close()
-        return jsonify({"mensaje": "Experiencia registrada con éxito", "id": id_exp}), 201
-    except Exception as e:
-        return jsonify({"mensaje": str(e)}), 500
-
-@app.route("/api/experiencias/<int:exp_id>/habilidades", methods=["POST"])
-def registrar_habilidad(exp_id):
-    try:
-        datos = request.get_json() or {}
-        conec = conectar_bd()
-        cursor = conec.cursor()
-        sql = "INSERT INTO habilidades (experiencia_id, nombre) VALUES (%s, %s)"
-        cursor.execute(sql, (exp_id, datos.get("nombre", "")))
-        conec.commit()
-        id_hab = cursor.lastrowid
-        cursor.close()
-        conec.close()
-        return jsonify({"mensaje": "Habilidad registrada con éxito", "id": id_hab}), 201
-    except Exception as e:
-        return jsonify({"mensaje": str(e)}), 500
-
-@app.route("/api/hojas-vida/<int:hoja_vida_id>/cursos", methods=["POST"])
-def registrar_curso(hoja_vida_id):
-    try:
-        datos = request.get_json() or {}
-        conec = conectar_bd()
-        cursor = conec.cursor()
-        sql = "INSERT INTO cursos (hoja_vida_id, nombre) VALUES (%s, %s)"
-        cursor.execute(sql, (hoja_vida_id, datos.get("nombre", "")))
-        conec.commit()
-        id_curso = cursor.lastrowid
-        cursor.close()
-        conec.close()
-        return jsonify({"mensaje": "Curso registrado con éxito", "id": id_curso}), 201
-    except Exception as e:
-        return jsonify({"mensaje": str(e)}), 500
-
-
-# CONSULTA COMPLETA ANIDADA
-
-
-@app.route("/api/hojas-vida/<int:hoja_vida_id>/completa", methods=["GET"])
-def obtener_hoja_vida_completa(hoja_vida_id):
+    datos = request.get_json()
     conec = conectar_bd()
-    cursor = conec.cursor(dictionary=True)
+    cursor = conec.cursor()
 
-    cursor.execute("SELECT * FROM hojas_vida WHERE id = %s", (hoja_vida_id,))
-    hoja = cursor.fetchone()
+    sql = """
+        INSERT INTO estudios
+        (hoja_vida_id, nivel, institucion, titulo, anio_graduacion)
+        VALUES (%s, %s, %s, %s, %s)
+    """
+    valores = (hoja_vida_id, datos["nivel"], datos["institucion"], datos["titulo"], datos["anio_graduacion"])
+    cursor.execute(sql, valores)
+    conec.commit()
+    id_estudio = cursor.lastrowid
+    cursor.close()
+    conec.close()
+    return jsonify({"mensaje": "Estudio registrado correctamente", "id": id_estudio, "hoja_vida_id": hoja_vida_id}), 201
 
-    if not hoja:
+
+@app.route("/api/hojasvida/<int:hoja_vida_id>/experiencias", methods=["POST"])
+def registrar_experiencia(hoja_vida_id):
+    datos = request.get_json()
+    conec = conectar_bd()
+    cursor = conec.cursor()
+
+    sql = """
+        INSERT INTO experiencias
+        (hoja_vida_id, empresa, cargo, tiempo, funciones)
+        VALUES (%s, %s, %s, %s, %s)
+    """
+    valores = (hoja_vida_id, datos["empresa"], datos["cargo"], datos["tiempo"], datos["funciones"])
+    cursor.execute(sql, valores)
+    conec.commit()
+    id_experiencia = cursor.lastrowid
+    cursor.close()
+    conec.close()
+    return jsonify({"mensaje": "Experiencia registrada correctamente", "id": id_experiencia, "hoja_vida_id": hoja_vida_id}), 201
+
+
+@app.route("/api/experiencias/<int:experiencia_id>/habilidades", methods=["POST"])
+@jwt_required()
+def registrar_habilidad(experiencia_id):
+    usuario_id = int(get_jwt_identity())
+    datos = request.get_json() or {}
+
+    if get_jwt().get("rol") != "aprendiz":
+        return jsonify({"mensaje": "No tienes permiso"}), 403
+
+    conec = conectar_bd()
+    cursor = conec.cursor()
+
+    # Verificar que la experiencia pertenece al aprendiz
+    cursor.execute("""
+        SELECT e.id
+        FROM experiencias e
+        INNER JOIN hojas_vida hv ON hv.id = e.hoja_vida_id
+        WHERE e.id = %s AND hv.usuario_id = %s
+    """, (experiencia_id, usuario_id))
+
+    if not cursor.fetchone():
         cursor.close()
         conec.close()
-        return jsonify({"mensaje": "Hoja de vida no encontrada"}), 404
+        return jsonify({"mensaje": "Experiencia no encontrada"}), 404
 
-    cursor.execute("SELECT id, nivel, institucion, titulo, anio_graduacion FROM estudios WHERE hoja_vida_id = %s", (hoja_vida_id,))
-    estudios = cursor.fetchall()
-
-    cursor.execute("SELECT id, empresa, cargo, tiempo, funciones FROM experiencias WHERE hoja_vida_id = %s", (hoja_vida_id,))
-    experiencias = cursor.fetchall()
-
-    for exp in experiencias:
-        cursor.execute("SELECT id, nombre FROM habilidades WHERE experiencia_id = %s", (exp["id"],))
-        exp["habilidades"] = cursor.fetchall()
-
-    cursor.execute("SELECT id, nombre FROM cursos WHERE hoja_vida_id = %s", (hoja_vida_id,))
-    cursos = cursor.fetchall()
-
+    cursor.execute("""
+        INSERT INTO habilidades (experiencia_id, nombre)
+        VALUES (%s, %s)
+    """, (experiencia_id, datos["nombre"]))
+    
+    conec.commit()
+    id_habilidad = cursor.lastrowid
+    
     cursor.close()
     conec.close()
 
-    return jsonify({
-        "datos_personales": hoja,
-        "estudios": estudios,
-        "experiencias": experiencias,
-        "cursos": cursos
-    }), 200
+    return jsonify({"mensaje": "Habilidad registrada correctamente", "id": id_habilidad}), 201
 
+
+# --- AQUÍ INICIA EL SERVIDOR LOCAL DE FLASK ---
 if __name__ == "__main__":
-    app.run(debug=True, port=5000)
+    app.run(debug=True) 
