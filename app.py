@@ -79,7 +79,7 @@ def registro_usuario():
     # El registro público siempre crea un aprendiz
     sql = """
         INSERT INTO usuarios (nombre, correo, password, rol)
-        VALUES (%s, %s, %s, 'aprendiz')
+        VALUES (%s, %s, %s, 'aprendiz',1)
     """
     cursor.execute(sql, (nombre, correo, password_hash))
     conec.commit()
@@ -242,11 +242,21 @@ def mi_hoja_vida():
 def obtener_hojasvida():
     conec = conectar_bd()
     cursor = conec.cursor(dictionary=True)
-    cursor.execute("SELECT * FROM hojas_vida")
-    hojas_vida = cursor.fetchall()
-    cursor.close()
-    conec.close()
-    return jsonify({"mensaje_prueba": "¡Hola Santiago, sí soy yo!"}), 200
+    try:
+        cursor.execute("SELECT * FROM hojas_vida")
+        hojas_vida = cursor.fetchall()
+        
+        if not hojas_vida:
+            return jsonify({"mensaje": "No hay hojas de vida registradas en el sistema"}), 404
+            
+        return jsonify(hojas_vida), 200
+        
+    except Exception as error:
+        print("Error al obtener las hojas de vida:", error)
+        return jsonify({"mensaje": "Ocurrió un error en el servidor al consultar los datos"}), 500
+    finally:
+        cursor.close()
+        conec.close()
 
 
 @app.route("/api/hojasvida/<int:hoja_vida_id>/estudios", methods=["POST"])
@@ -328,6 +338,6 @@ def registrar_habilidad(experiencia_id):
     return jsonify({"mensaje": "Habilidad registrada correctamente", "id": id_habilidad}), 201
 
 
-# --- AQUÍ INICIA EL SERVIDOR LOCAL DE FLASK ---
+# INICIO DEL SERVIDOR LOCAL DE FLASK
 if __name__ == "__main__":
-    app.run(debug=True) 
+    app.run(debug=True)
