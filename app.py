@@ -241,20 +241,59 @@ def mi_hoja_vida():
 
 
 # LISTAR TODAS LAS HOJAS DE VIDA (Ruta protegida para reclutadores)
+# LISTAR TODAS LAS HOJAS DE VIDA COMPLETAS (Ruta protegida para reclutadores)
 @app.route("/api/hojas-vida", methods=["GET"])
 @rol_requerido("reclutador")
 def obtener_hojasvida():
     conec = conectar_bd()
-    cursor = conec.cursor(dictionary=True)
+    cursor = conec.cursor(dictionary=True, buffered=True)
     try:
         cursor.execute("SELECT * FROM hojas_vida")
         hojas_vida = cursor.fetchall()
-        
+
         if not hojas_vida:
             return jsonify({"mensaje": "No hay hojas de vida registradas en el sistema"}), 404
-            
-        return jsonify(hojas_vida), 200
-        
+
+        resultado = []
+
+        for hv in hojas_vida:
+            hoja_vida_id = hv["id"]
+
+            # Estudios
+            cursor.execute("SELECT * FROM estudios WHERE hoja_vida_id = %s", (hoja_vida_id,))
+            estudios = cursor.fetchall()
+
+            # Cursos
+            cursor.execute("SELECT * FROM cursos WHERE hoja_vida_id = %s", (hoja_vida_id,))
+            cursos = cursor.fetchall()
+
+            # Experiencias
+            cursor.execute("SELECT * FROM experiencias WHERE hoja_vida_id = %s", (hoja_vida_id,))
+            experiencias = cursor.fetchall()
+
+            # Habilidades vinculadas a las experiencias de esta HV
+            cursor.execute("""
+                SELECT h.id, h.nombre, h.experiencia_id
+                FROM habilidades h
+                INNER JOIN experiencias e ON h.experiencia_id = e.id
+                WHERE e.hoja_vida_id = %s
+            """, (hoja_vida_id,))
+            habilidades = cursor.fetchall()
+
+            for experiencia in experiencias:
+                experiencia["habilidades"] = [
+                    h for h in habilidades if h["experiencia_id"] == experiencia["id"]
+                ]
+
+            resultado.append({
+                "datos_personales": hv,
+                "estudios": estudios,
+                "cursos": cursos,
+                "experiencias": experiencias
+            })
+
+        return jsonify(resultado), 200
+
     except Exception as error:
         print("Error al obtener las hojas de vida:", error)
         return jsonify({"mensaje": "Ocurrió un error en el servidor al consultar los datos"}), 500
