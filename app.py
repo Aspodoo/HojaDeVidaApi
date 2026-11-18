@@ -76,12 +76,12 @@ def registro_usuario():
 
     password_hash = generate_password_hash(password)
 
-    # El registro público siempre crea un aprendiz
+# El registro público siempre crea un aprendiz
     sql = """
-        INSERT INTO usuarios (nombre, correo, password, rol)
-        VALUES (%s, %s, %s, 'aprendiz',1)
+        INSERT INTO usuarios (nombre, correo, password, rol, estado)
+        VALUES (%s, %s, %s, %s, %s)
     """
-    cursor.execute(sql, (nombre, correo, password_hash))
+    cursor.execute(sql, (nombre, correo, password_hash, 'aprendiz', True))
     conec.commit()
     id_usuario = cursor.lastrowid
 
@@ -336,6 +336,34 @@ def registrar_habilidad(experiencia_id):
     conec.close()
 
     return jsonify({"mensaje": "Habilidad registrada correctamente", "id": id_habilidad}), 201
+
+@app.route("/api/hojasvida/<int:hoja_vida_id>/cursos", methods=["POST"])
+def registrar_curso(hoja_vida_id):
+    datos = request.get_json()
+    conec = conectar_bd()
+    cursor = conec.cursor()
+
+    # Asegúrate de que estas columnas coincidan con las de tu tabla 'cursos' en MySQL
+    sql = """
+        INSERT INTO cursos
+        (hoja_vida_id, nombre)
+        VALUES (%s, %s)
+    """
+    # Si en tu base de datos pusiste más columnas (como institucion o anio), agrégalas aquí y en el SQL
+    valores = (hoja_vida_id, datos["nombre"])
+    
+    cursor.execute(sql, valores)
+    conec.commit()
+    id_curso = cursor.lastrowid
+    
+    cursor.close()
+    conec.close()
+    
+    return jsonify({
+        "mensaje": "Curso registrado correctamente", 
+        "id": id_curso, 
+        "hoja_vida_id": hoja_vida_id
+    }), 201
 
 
 # INICIO DEL SERVIDOR LOCAL DE FLASK
