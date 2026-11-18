@@ -187,8 +187,13 @@ def mi_hoja_vida():
     conec = conectar_bd()
     cursor = conec.cursor(dictionary=True, buffered=True)
 
-    # 1. Obtener datos personales
-    cursor.execute("SELECT * FROM hojas_vida WHERE usuario_id=%s", (usuario_id,))
+    # 1. Trae la última hoja de vida registrada por este aprendiz
+    cursor.execute("""
+        SELECT * FROM hojas_vida 
+        WHERE usuario_id = %s 
+        ORDER BY id DESC 
+        LIMIT 1
+    """, (usuario_id,))
     hv = cursor.fetchone()
 
     if not hv:
@@ -198,19 +203,19 @@ def mi_hoja_vida():
 
     hoja_vida_id = hv["id"]
 
-    # 2. Obtener estudios
-    cursor.execute("SELECT * FROM estudios WHERE hoja_vida_id=%s", (hoja_vida_id,))
+    # 2. Estudios
+    cursor.execute("SELECT * FROM estudios WHERE hoja_vida_id = %s", (hoja_vida_id,))
     estudios = cursor.fetchall()
 
-    # 3. Obtener cursos
-    cursor.execute("SELECT * FROM cursos WHERE hoja_vida_id=%s", (hoja_vida_id,))
+    # 3. Cursos
+    cursor.execute("SELECT * FROM cursos WHERE hoja_vida_id = %s", (hoja_vida_id,))
     cursos = cursor.fetchall()
 
-    # 4. Obtener experiencias
-    cursor.execute("SELECT * FROM experiencias WHERE hoja_vida_id=%s", (hoja_vida_id,))
+    # 4. Experiencias
+    cursor.execute("SELECT * FROM experiencias WHERE hoja_vida_id = %s", (hoja_vida_id,))
     experiencias = cursor.fetchall()
 
-    # 5. Obtener habilidades vinculadas a las experiencias de esta HV
+    # 5. Habilidades vinculadas a las experiencias de esta HV
     cursor.execute("""
         SELECT h.id, h.nombre, h.experiencia_id 
         FROM habilidades h
@@ -219,7 +224,6 @@ def mi_hoja_vida():
     """, (hoja_vida_id,))
     habilidades = cursor.fetchall()
 
-    # Asociar habilidades con cada experiencia
     for experiencia in experiencias:
         experiencia["habilidades"] = [
             h for h in habilidades if h["experiencia_id"] == experiencia["id"]
