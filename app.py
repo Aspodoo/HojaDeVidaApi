@@ -185,7 +185,7 @@ def mi_hoja_vida():
         return jsonify({"mensaje": "Consulta exclusiva para aprendices"}), 403
 
     conec = conectar_bd()
-    cursor = conec.cursor(dictionary=True)
+    cursor = conec.cursor(dictionary=True, buffered=True)
 
     # 1. Obtener datos personales
     cursor.execute("SELECT * FROM hojas_vida WHERE usuario_id=%s", (usuario_id,))
@@ -368,4 +368,4 @@ def registrar_curso(hoja_vida_id):
 
 # INICIO DEL SERVIDOR LOCAL DE FLASK
 if __name__ == "__main__":
-    app.run(debug=True)
+    app.run(debug=True, port=5001)
